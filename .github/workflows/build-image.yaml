@@ -63,6 +63,15 @@ on:
         description: Sévérité qui interdit la publication.
         type: string
         default: critical
+      signer-repo:
+        description: >-
+          Ce dépôt-ci, pour l'auto-vérification. Aucun contexte ne donne à un
+          workflow réutilisable le nom du dépôt qui l'héberge — `github.repository`
+          désigne l'appelant. Il est donc écrit en clair, ce qui n'a pas
+          d'incidence de sécurité : cette assertion sert à se relire, pas à se
+          faire confiance.
+        type: string
+        default: nicolasleborgne/focusyn-builder
 
     outputs:
       image:
@@ -199,12 +208,12 @@ jobs:
       # l'outil qu'emploierait n'importe qui. Une signature qu'on ne sait pas
       # relire ne protège personne.
       #
-      # L'assertion `--signer-repo`, qui exige que la signature vienne de ce
-      # constructeur-ci, appartient au *vérificateur extérieur* : elle est dans
-      # les notes de version. Ici, aucun contexte ne donne le nom du dépôt
-      # propriétaire d'un workflow réutilisable — `github.repository` désigne
-      # l'appelant —, et une assertion approximative vaudrait moins que pas
-      # d'assertion du tout.
+      # **`--signer-repo` n'est pas facultatif**, et c'est la première exécution
+      # réelle qui l'a appris : la signature vient de ce constructeur, pas du
+      # dépôt du produit, et sans cette assertion `gh` refuse tout net —
+      # « verifying with issuer sigstore.dev », sans autre explication. La
+      # commande des notes de version est donc la seule qui fonctionne, ce qui
+      # tombe bien.
       - name: Se vérifier soi-même
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -212,6 +221,7 @@ jobs:
           gh attestation verify \
             "oci://${{ steps.nom.outputs.image }}@${{ steps.build.outputs.digest }}" \
             --repo "${GITHUB_REPOSITORY}" \
+            --signer-repo "${{ inputs.signer-repo }}" \
             --predicate-type https://slsa.dev/provenance/v1
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
