@@ -107,7 +107,40 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Construire et pousser
+      # --- Construire, éprouver, puis seulement pousser ---------------------
+      # L'ordre n'est pas cosmétique. Pousser d'abord reviendrait à publier une
+      # image vulnérable *avec son attestation*, et à ne rattraper que la
+      # release GitHub — l'artefact, lui, serait là, signé, vérifiable, et
+      # récupérable par n'importe qui.
+      #
+      # **Aucun cache partagé** : `cache-from: type=gha` lirait des couches
+      # écrites par la CI de la branche par défaut, pour un autre commit. La
+      # provenance affirme « cet artefact vient de ce commit » ; une couche
+      # venue d'ailleurs rendrait l'affirmation fausse. Une release est rare,
+      # deux minutes de plus ne coûtent rien. Le cache local du builder, lui,
+      # sert aux deux passes ci-dessous, dans la même exécution.
+      - name: Construire, sans pousser
+        id: local
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ${{ inputs.context }}
+          target: ${{ inputs.target }}
+          push: false
+          load: true
+          tags: ${{ steps.nom.outputs.image }}:candidat
+          provenance: false
+          sbom: false
+
+      # On ne publie pas une image portant une faille que la reconstruction
+      # corrigerait — et à ce stade, rien n'est encore publié.
+      - name: Vulnérabilités, avant publication
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            "anchore/grype:${{ inputs.grype-version }}" \
+            "${{ steps.nom.outputs.image }}:candidat" \
+            --only-fixed --fail-on "${{ inputs.fail-on }}" -o table
+
+      - name: Pousser l'image éprouvée
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -117,7 +150,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
           # Les attestations de BuildKit ne sont pas signées, et elles
           # transformeraient l'image en index dont le condensat ne désigne plus
           # une image. La provenance qui compte est celle de l'étape suivante.
@@ -153,16 +185,6 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
-
-      # On ne publie pas une image portant une faille que la reconstruction
-      # corrigerait. Refait ici plutôt que supposé : l'image publiée n'est pas
-      # celle qu'a testée la CI, c'est une autre construction, un autre jour.
-      - name: Vulnérabilités de l'image publiée
-        run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            "anchore/grype:${{ inputs.grype-version }}" \
-            "${{ steps.nom.outputs.image }}@${{ steps.build.outputs.digest }}" \
-            --only-fixed --fail-on "${{ inputs.fail-on }}" -o table
 
       # Vérifier, ne pas déduire : la chaîne relit sa propre attestation avec
       # l'outil qu'emploierait n'importe qui. Une signature qu'on ne sait pas
