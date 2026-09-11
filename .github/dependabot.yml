@@ -1,0 +1,25 @@
+# Le constructeur signe pour les autres : ses propres épinglages ne doivent pas
+# vieillir en silence.
+#
+# Ses six actions sont figées par empreinte, et une empreinte figée est une
+# empreinte gelée : sans cette entrée, elle porterait un jour une faille que
+# plus personne ne verrait passer. Dependabot sait relever une empreinte et
+# corriger l'étiquette du commentaire avec.
+#
+# Un seul écosystème, parce qu'il n'y a rien d'autre ici : trois fichiers, pas
+# une ligne de code applicatif.
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dépendances]
