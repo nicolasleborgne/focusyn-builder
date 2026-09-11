@@ -34,6 +34,13 @@ on:
         description: Registre de destination.
         type: string
         default: ghcr.io
+      version:
+        description: >-
+          Version publiée, sans le « v ». Passée par l'appelant plutôt que
+          déduite de `github.ref` : la chaîne construit désormais sur `main`, où
+          aucun tag n'existe encore — il ne naîtra qu'une fois l'image éprouvée.
+        type: string
+        required: true
       target:
         description: Étape du Dockerfile à construire.
         type: string
@@ -103,9 +110,11 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ steps.nom.outputs.image }}
+          # Le numéro vient de l'appelant, pas de la référence git : sur `main`
+          # il n'y a pas de tag à interpréter.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.version }}
+            type=raw,value=latest
 
       # --- Construire, éprouver, puis seulement pousser ---------------------
       # L'ordre n'est pas cosmétique. Pousser d'abord reviendrait à publier une
