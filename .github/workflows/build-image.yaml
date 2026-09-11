@@ -1,0 +1,189 @@
+# ---------------------------------------------------------------------------
+# Le constructeur
+# ---------------------------------------------------------------------------
+# Ce fichier n'appartient pas au dépôt Focusyn : il vit dans un dépôt séparé,
+# et c'est tout l'intérêt. SLSA niveau 3 demande que « le matériel secret
+# servant à signer la provenance soit hors de portée des étapes de construction
+# définies par l'utilisateur ». Cela ne se joue pas sur la qualité du code mais
+# sur sa provenance :
+#
+#   - un workflow local (`uses: ./.github/workflows/…`) vient du même commit que
+#     ce qu'il construit. Celui qui écrit la release écrit le constructeur :
+#     il n'y a pas deux parties, il n'y en a qu'une. Niveau 2, pas davantage.
+#   - un workflow réutilisable d'un **autre dépôt**, épinglé par empreinte,
+#     définit *toutes* les étapes. Le dépôt appelant ne fournit que des
+#     paramètres ; il ne peut pas insérer d'étape dans cette tâche, donc il ne
+#     peut pas atteindre le jeton OIDC qui signe.
+#
+# Ce que cela laisse dehors, et qu'il faut savoir : tant que la même personne
+# possède les deux dépôts, l'isolation est technique, pas organisationnelle.
+# Elle protège d'une dépendance compromise, d'une action tierce compromise,
+# d'un Dockerfile hostile — pas de son propriétaire.
+#
+# Le contexte `github` d'un workflow réutilisable reste celui de l'appelant :
+# `actions/checkout` sans argument récupère donc le dépôt qui appelle, au commit
+# qui appelle. C'est ce qui permet à ce constructeur de ne rien savoir de
+# Focusyn.
+
+name: Construire et attester une image
+
+on:
+  workflow_call:
+    inputs:
+      registry:
+        description: Registre de destination.
+        type: string
+        default: ghcr.io
+      target:
+        description: Étape du Dockerfile à construire.
+        type: string
+        default: prod
+      context:
+        description: Contexte de construction.
+        type: string
+        default: .
+      environment:
+        description: >-
+          Environnement du dépôt appelant sous lequel construire. Il s'y résout,
+          pas ici : c'est lui qui porte la règle « seuls les tags v* ».
+        type: string
+        default: release
+      grype-version:
+        description: Version de grype, épinglée comme le reste.
+        type: string
+        default: v0.118.0
+      fail-on:
+        description: Sévérité qui interdit la publication.
+        type: string
+        default: critical
+
+    outputs:
+      image:
+        description: Nom complet de l'image publiée.
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: Condensat de l'image publiée.
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    name: Image, SBOM et provenance
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    outputs:
+      image: ${{ steps.nom.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      # Le dépôt appelant, au commit appelant. `persist-credentials: false` :
+      # un jeton laissé dans `.git/config` est lisible par tout ce qui tourne
+      # ensuite, à commencer par la construction elle-même.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # GHCR n'accepte que des minuscules ; un compte qui porte une majuscule
+      # ferait échouer la poussée, et seulement au moment de publier.
+      - name: Nom de l'image
+        id: nom
+        run: |
+          echo "image=${{ inputs.registry }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Étiquettes et annotations
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ steps.nom.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Construire et pousser
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ inputs.context }}
+          target: ${{ inputs.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          # Les attestations de BuildKit ne sont pas signées, et elles
+          # transformeraient l'image en index dont le condensat ne désigne plus
+          # une image. La provenance qui compte est celle de l'étape suivante.
+          provenance: false
+          sbom: false
+
+      # Le jeton OIDC est demandé ici, dans une tâche dont l'appelant ne définit
+      # aucune étape. C'est là toute la différence avec le niveau 2 : la
+      # provenance nomme ce constructeur (`job_workflow_ref`), et un dépôt qui
+      # se contenterait de l'appeler ne peut pas la produire lui-même.
+      - name: Attester la provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.nom.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # L'inventaire vient de l'image publiée, pas des fichiers de
+      # verrouillage : ceux-ci ne disent rien des paquets du système ni de ce
+      # qui est compilé dans le serveur.
+      - name: Inventaire de l'image
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.nom.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Attester le SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.nom.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      # On ne publie pas une image portant une faille que la reconstruction
+      # corrigerait. Refait ici plutôt que supposé : l'image publiée n'est pas
+      # celle qu'a testée la CI, c'est une autre construction, un autre jour.
+      - name: Vulnérabilités de l'image publiée
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            "anchore/grype:${{ inputs.grype-version }}" \
+            "${{ steps.nom.outputs.image }}@${{ steps.build.outputs.digest }}" \
+            --only-fixed --fail-on "${{ inputs.fail-on }}" -o table
+
+      # Vérifier, ne pas déduire : la chaîne relit sa propre attestation avec
+      # l'outil qu'emploierait n'importe qui. Une signature qu'on ne sait pas
+      # relire ne protège personne.
+      #
+      # L'assertion `--signer-repo`, qui exige que la signature vienne de ce
+      # constructeur-ci, appartient au *vérificateur extérieur* : elle est dans
+      # les notes de version. Ici, aucun contexte ne donne le nom du dépôt
+      # propriétaire d'un workflow réutilisable — `github.repository` désigne
+      # l'appelant —, et une assertion approximative vaudrait moins que pas
+      # d'assertion du tout.
+      - name: Se vérifier soi-même
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh attestation verify \
+            "oci://${{ steps.nom.outputs.image }}@${{ steps.build.outputs.digest }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --predicate-type https://slsa.dev/provenance/v1
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: sbom.spdx.json

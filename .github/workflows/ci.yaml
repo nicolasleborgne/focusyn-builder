@@ -1,0 +1,30 @@
+# Le constructeur signe pour les autres : il se relit lui-même.
+#
+# actionlint passe aussi les blocs `run:` à shellcheck. Une variable non
+# protégée dans un script de CI est une injection comme une autre — et ici,
+# elle s'exécuterait dans la tâche même qui détient le jeton de signature.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  workflows:
+    name: Analyse des workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            rhysd/actionlint:1.7.12 -color
